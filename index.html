@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Real-Time Hill Island - Three.js</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', sans-serif; }
+        #ui {
+            position: absolute;
+            top: 25px;
+            left: 25px;
+            color: white;
+            background: rgba(10, 10, 10, 0.75);
+            padding: 20px;
+            border-radius: 15px;
+            pointer-events: none;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+        }
+        .time-display { font-size: 1.5rem; font-weight: bold; color: #ffffff; margin-bottom: 5px; }
+        .time-indicator { font-weight: bold; color: #ffcc00; transition: color 0.5s; }
+        .status-dot { height: 12px; width: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; vertical-align: middle; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h2 style="margin: 0 0 5px 0; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 2px; opacity: 0.7;">Waktu Lokal</h2>
+    <div id="clock" class="time-display">00:00:00</div>
+    <p style="margin: 5px 0;"><span id="status-dot" class="status-dot" style="background-color: #ffcc00;"></span>Siklus: <span id="time-label" class="time-indicator">Siang</span></p>
+    <div style="font-size: 11px; opacity: 0.5; margin-top: 10px;">
+        Sinkron dengan jam perangkat Anda<br>
+        Klik & Geser untuk rotasi
+    </div>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three'; 
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { Water } from 'three/addons/objects/Water.js';
+    import { Sky } from 'three/addons/objects/Sky.js';
+
+    let scene, camera, renderer, controls, water, sky, sun, mainLight;
+    let islandMesh, lighthouse, lightBeam, lightPivot, windowsMaterial;
+
+    init();
+    animate();
+
+    function init() {
+        renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        scene = new THREE.Scene();
+        scene.fog = new THREE.Fog(0x87ceeb, 100, 2000);
+
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+        camera.position.set(160, 90, 160);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.maxPolarAngle = Math.PI * 0.48;
+        controls.minDistance = 60;
+        controls.maxDistance = 1000;
+
+        sky = new Sky();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+
+        sun = new THREE.Vector3();
+
+        const waterGeo = new THREE.PlaneGeometry(30000, 30000);
+        water = new Water(waterGeo, {
+            textureWidth: 512,
+            textureHeight: 512,
+            waterNormals: new THREE.TextureLoader().load('https://threejs.org/examples/textures/waternormals.jpg', (t) => {
+                t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            }),
+            sunDirection: new THREE.Vector3(),
+            sunColor: 0xffffff,
+            waterColor: 0x001e0f,
+            distortionScale: 3.7,
+            fog: true
+        });
+        water.rotation.x = -Math.PI / 2;
+        scene.add(water);
+
+        mainLight = new THREE.DirectionalLight(0xffffff, 2.5);
+        mainLight.castShadow = true;
+        mainLight.shadow.mapSize.set(2048, 2048);
+        mainLight.shadow.camera.left = -200;
+        mainLight.shadow.camera.right = 200;
+        mainLight.shadow.camera.top = 200;
+        mainLight.shadow.camera.bottom = -200;
+        scene.add(mainLight);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+        createIsland();
+        createLighthouse();
+        createForest();
+
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    function getHillHeight(x, z) {
+        const xzDist = new THREE.Vector2(x, z).length();
+        const hillA = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 6;
+        const hillB = Math.sin(x * 0.05 + 5) * Math.sin(z * 0.06) * 10;
+        const detail = Math.sin(x * 0.3) * Math.cos(z * 0.3) * 0.5;
+        let baseElevation = 0;
+        if (xzDist < 48) baseElevation = Math.pow(1 - (xzDist / 50), 1.5) * 8;
+        return baseElevation + hillA + hillB + detail;
+    }
+
+    function createIsland() {
+        const geometry = new THREE.IcosahedronGeometry(50, 128);
+        const position = geometry.attributes.position;
+        const vertex = new THREE.Vector3();
+
+        for (let i = 0; i < position.count; i++) {
+            vertex.fromBufferAttribute(position, i);
+            const xzDist = new THREE.Vector2(vertex.x, vertex.z).length();
+            vertex.y = getHillHeight(vertex.x, vertex.z);
+            if (xzDist < 45 && vertex.y < 0.2) vertex.y = 0.5;
+            if (xzDist > 52) {
+                vertex.y = -6;
+            } else if (xzDist > 44) {
+                const t = (xzDist - 44) / 8;
+                vertex.y = THREE.MathUtils.lerp(vertex.y, -1.5, t);
+            }
+            position.setXYZ(i, vertex.x, vertex.y, vertex.z);
+        }
+        
+        geometry.computeVertexNormals();
+        geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(position.count * 3), 3));
+        const colors = geometry.attributes.color;
+
+        for (let i = 0; i < position.count; i++) {
+            vertex.fromBufferAttribute(position, i);
+            if (vertex.y > 13) {
+                colors.setXYZ(i, 0.28, 0.6, 0.22);
+            } else if (vertex.y > 2) {
+                colors.setXYZ(i, 0.2, 0.45, 0.12);
+            } else if (vertex.y > 0.5) {
+                colors.setXYZ(i, 0.6, 0.55, 0.4);
+            } else {
+                colors.setXYZ(i, 0.95, 0.85, 0.65);
+            }
+        }
+
+        islandMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.8,
+            metalness: 0.01
+        }));
+        islandMesh.receiveShadow = true;
+        islandMesh.castShadow = true;
+        scene.add(islandMesh);
+    }
+
+    function createLighthouse() {
+        lighthouse = new THREE.Group();
+        
+        // Menara Utama
+        const towerGeo = new THREE.CylinderGeometry(1.2, 1.8, 16, 16);
+        const towerMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
+        const tower = new THREE.Mesh(towerGeo, towerMat);
+        tower.position.y = 8;
+        tower.castShadow = true;
+        lighthouse.add(tower);
+
+        // Material Jendela dengan Emissive (untuk efek menyala)
+        windowsMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x111111,
+            emissive: 0x000000, 
+            roughness: 0.2
+        });
+        const windowGeo = new THREE.BoxGeometry(0.4, 0.7, 0.15);
+        
+        // Membuat jendela di empat sisi (0, 90, 180, 270 derajat)
+        for (let level = 0; level < 4; level++) { // 4 tingkat ketinggian
+            const h = 4 + (level * 3);
+            const radius = 1.4 - (level * 0.08); 
+
+            for (let side = 0; side < 4; side++) { // 4 sisi per tingkat
+                const win = new THREE.Mesh(windowGeo, windowsMaterial);
+                const angle = side * (Math.PI / 2); // 90 derajat tiap sisi
+                win.position.set(
+                    Math.cos(angle) * radius, 
+                    h, 
+                    Math.sin(angle) * radius
+                );
+                win.rotation.y = angle;
+                lighthouse.add(win);
+            }
+        }
+
+        // Galeri atas
+        const gal = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.4, 16), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+        gal.position.y = 16;
+        lighthouse.add(gal);
+
+        // Pivot lampu utama
+        lightPivot = new THREE.Group();
+        lightPivot.position.y = 17.3;
+        lighthouse.add(lightPivot);
+
+        const lantern = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 2.2, 12, 1, true), new THREE.MeshStandardMaterial({ color: 0x111111, side: THREE.DoubleSide }));
+        lightPivot.add(lantern);
+
+        // Cahaya mercusuar
+        const beamGeo = new THREE.ConeGeometry(8, 140, 32);
+        const beamMat = new THREE.MeshBasicMaterial({ 
+            color: 0xffffaa, 
+            transparent: true, 
+            opacity: 0, 
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide
+        });
+        lightBeam = new THREE.Mesh(beamGeo, beamMat);
+        lightBeam.position.set(0, 0, 70);
+        lightBeam.rotation.x = -Math.PI / 2;
+        lightPivot.add(lightBeam);
+
+        const spot = new THREE.SpotLight(0xffffcc, 0, 400, Math.PI / 8, 0.5, 1);
+        spot.position.set(0, 0, 5); 
+        const spotTarget = new THREE.Object3D();
+        spotTarget.position.set(0, 0, 100);
+        lightPivot.add(spotTarget);
+        spot.target = spotTarget;
+        lightPivot.add(spot);
+        
+        lighthouse.userData.spot = spot;
+
+        const posX = -12;
+        const posZ = -10;
+        const posY = getHillHeight(posX, posZ);
+        lighthouse.position.set(posX, posY - 0.5, posZ);
+        scene.add(lighthouse);
+    }
+
+    function createForest() {
+        const leavesGeo = new THREE.SphereGeometry(1.5, 8, 8);
+        const logGeo = new THREE.CylinderGeometry(0.12, 0.22, 2.5);
+        for (let i = 0; i < 220; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = 4 + Math.random() * 44;
+            const x = Math.cos(angle) * r;
+            const z = Math.sin(angle) * r;
+            const distToLighthouse = new THREE.Vector2(x - (-12), z - (-10)).length();
+            if (distToLighthouse < 8) continue;
+            const y = getHillHeight(x, z);
+            if (y > 1.2 && y < 16) { 
+                const tree = new THREE.Group();
+                const log = new THREE.Mesh(logGeo, new THREE.MeshStandardMaterial({ color: 0x3d2b1f }));
+                log.position.y = 1.25;
+                tree.add(log);
+                const leaves = new THREE.Mesh(leavesGeo, new THREE.MeshStandardMaterial({ color: 0x1a4331 }));
+                leaves.position.y = 3.2;
+                tree.add(leaves);
+                tree.position.set(x, y - 0.2, z);
+                tree.scale.setScalar(0.4 + Math.random() * 0.8);
+                tree.rotation.y = Math.random() * Math.PI;
+                scene.add(tree);
+            }
+        }
+    }
+
+    function updateEnvironment() {
+        const now = new Date();
+        const hours = now.getHours();
+        const minutes = now.getMinutes();
+        const seconds = now.getSeconds();
+        document.getElementById('clock').innerText = now.toLocaleTimeString('id-ID');
+
+        const dayProgress = (hours * 3600 + minutes * 60 + seconds) / 86400;
+        const phi = (dayProgress * 2 * Math.PI) + Math.PI; 
+        sun.setFromSphericalCoords(1, phi, Math.PI / 2);
+
+        const uniforms = sky.material.uniforms;
+        sky.material.uniforms['sunPosition'].value.copy(sun);
+        water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+        mainLight.position.copy(sun).multiplyScalar(1000);
+
+        const uiDot = document.getElementById('status-dot');
+        const uiLabel = document.getElementById('time-label');
+
+        let fogColor;
+        let rayleigh = 3;
+        let turbidity = 10;
+
+        if (sun.y > 0.4) {
+            // SIANG
+            fogColor = new THREE.Color(0x3282b8); 
+            rayleigh = 2;
+            turbidity = 5;
+            uiLabel.innerText = "Siang";
+            uiLabel.style.color = "#fab005";
+            uiDot.style.backgroundColor = "#fab005";
+            mainLight.intensity = 2.5;
+            renderer.toneMappingExposure = 0.9;
+            lightBeam.material.opacity = 0;
+            lighthouse.userData.spot.intensity = 0;
+            windowsMaterial.emissive.setHex(0x000000); // Jendela mati
+        } else if (sun.y > 0.05) {
+            // SORE / PAGI
+            const t = (sun.y - 0.05) / 0.35;
+            fogColor = new THREE.Color(0xfca311).lerp(new THREE.Color(0x3282b8), t);
+            rayleigh = 4;
+            turbidity = 15;
+            uiLabel.innerText = sun.y > 0.2 ? "Sore" : "Golden Hour";
+            mainLight.intensity = 1.8;
+            renderer.toneMappingExposure = 0.8;
+            lightBeam.material.opacity = 0;
+            windowsMaterial.emissive.setHex(0x000000);
+        } else if (sun.y > -0.15) {
+            // TWILIGHT / SENJA
+            const t = (sun.y + 0.15) / 0.2;
+            fogColor = new THREE.Color(0x14213d).lerp(new THREE.Color(0xe85d04), t);
+            rayleigh = 10;
+            turbidity = 20;
+            uiLabel.innerText = "Senja";
+            uiLabel.style.color = "#ff4d00";
+            uiDot.style.backgroundColor = "#ff4d00";
+            mainLight.intensity = 0.4;
+            renderer.toneMappingExposure = 0.5;
+            lightBeam.material.opacity = 0.2;
+            lightPivot.rotation.y += 0.02;
+            lighthouse.userData.spot.intensity = 100;
+            windowsMaterial.emissive.setHex(0x443300); // Mulai meredup menyala
+        } else {
+            // MALAM
+            fogColor = new THREE.Color(0x02040a); 
+            rayleigh = 0.1;
+            turbidity = 0.1;
+            uiLabel.innerText = "Malam";
+            uiLabel.style.color = "#4dabf7";
+            uiDot.style.backgroundColor = "#4dabf7";
+            mainLight.intensity = 0.02;
+            renderer.toneMappingExposure = 0.25;
+            lightPivot.rotation.y += 0.025;
+            lightBeam.material.opacity = 0.45;
+            lighthouse.userData.spot.intensity = 250;
+            windowsMaterial.emissive.setHex(0xffcc33); // Jendela menyala terang
+        }
+        
+        uniforms['rayleigh'].value = rayleigh;
+        uniforms['turbidity'].value = turbidity;
+        scene.fog.color.copy(fogColor);
+        renderer.setClearColor(fogColor);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        water.material.uniforms['time'].value += 0.4 / 60.0;
+        controls.update();
+        updateEnvironment();
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
+
+
